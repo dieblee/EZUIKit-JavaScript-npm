@@ -5,7 +5,6 @@ import { onMounted, onBeforeUnmount, ref } from "vue"
 interface IPlayer {
   play: Function; stop: Function; getOSDTime: Function;
   pause: Function; resume: Function; seekTo: Function;
-  getSpeed: Function; setSpeed: Function;
   capturePicture: Function; openSound: Function; closeSound: Function;
   startSave: Function; stopSave: Function;
   startTalk: Function; stopTalk: Function; fullscreen: Function; destroy: Function;
@@ -14,11 +13,16 @@ interface IPlayer {
 
 let player: IPlayer;
 
-const accessToken = ref(
-  "at.867lpo9f4tx55uko7lkqeyxi968tjggd-7lkowucs09-0e0ex6l-zpqoua5rs"
-);
+// TODO: appKey and appSecret from EZVIZ Open Platform
+const appKey = "a0660b84cb974a26bf3c3ba432f799f3";
+const appSecret = "ea59fc7f896e1794d842a49f1fae9503";
+const accessToken = ref("");
+const tokenExpireTime = ref("");
 const url = ref("ezopen://open.ys7.com/BG9483344/1.hd.live");
+const playbackUrl = ref("ezopen://open.ys7.com/BG9483344/1.rec?begin=20260713000000");
 const staticPath = ref("");
+const template = ref("pcLive");
+const isPlaybackMode = ref(false);
 
 const recDate = ref("20260713");
 const recStartTime = ref("00:00:00");
@@ -26,179 +30,309 @@ const recEndTime = ref("23:59:59");
 const isRecording = ref(false);
 const recordingProgress = ref("");
 const seekInput = ref("20260713000000");
+let recHeartbeat: ReturnType<typeof setInterval> | null = null;
 let isPlayingRec = false;
-let recHeartbeat = null;
+var scheduleInterval = null;
+var scheduleEnabled = ref(false);
 
-function pad2(n) { return n.toString().padStart(2, "0"); }
-function formatHHMMSS(s) { var p = s.split(" "); return p[p.length - 1]; }
-function timeToSeconds(t) { var x = t.split(":").map(Number); return x[0]*3600 + x[1]*60 + (x[2]||0); }
-function timeStrToUrlParam(t) { return t.replace(/:/g, ""); }
+// MinIO upload
+const enableMinioUpload = ref(false);
+const minioEndpoint = ref("http://localhost:9000");
+const minioBucket = ref("recordings");
+const minioAccessKey = ref("minioadmin");
+const minioSecretKey = ref("minioadmin");
+const uploadStatus = ref("");
 
-const play = () => { if (player) player.play(); };
-const stop = () => { if (player) player.stop(); };
-const openSound = () => { if (player) player.openSound(); };
-const closeSound = () => { if (player) player.closeSound(); };
-const capturePicture = () => { if (player) player.capturePicture(String(Date.now())).then(function(d) { console.log(d); }); };
-const startSave = () => { if (player) player.startSave(String(Date.now())).then(function(d) { console.log("startSave", d); }); };
-const stopSave = () => { if (player) player.stopSave().then(function(d) { console.log("stopSave", d); }); };
-const startTalk = () => { if (player) player.startTalk(); };
-const stopTalk = () => { if (player) player.stopTalk(); };
-const fullscreen = () => { if (player) player.fullscreen(); };
-const destroy = () => { if (player) { player.destroy(); player = null; } };
+function pad2(n: number): string { return n.toString().padStart(2, "0"); }
+function toSec(t: string): number { const a = t.split(":").map(Number); return a[0] * 3600 + a[1] * 60 + (a[2] || 0); }
+function fmtHMS(s: string): string { return s.split(" ").pop() || ""; }
 
-const seekToTime = () => { if (player && isPlayingRec) { player.seekTo(seekInput.value); } };
+function play() { if (player) player.play(); }
+function stop() { if (player) player.stop(); }
+function openSound() { if (player) player.openSound(); }
+function closeSound() { if (player) player.closeSound(); }
+function capturePicture() { if (player) player.capturePicture(String(Date.now())); }
+function startSave() { if (player) player.startSave(String(Date.now())); }
+function stopSave() { if (player) player.stopSave(); }
+function startTalk() { if (player) player.startTalk(); }
+function stopTalk() { if (player) player.stopTalk(); }
+function fullscreen() { if (player) player.fullscreen(); }
+function destroyF() { if (player) { player.destroy(); player = null!; } }
+function seekToTime() { if (player && isPlayingRec) player.seekTo(seekInput.value); }
 
-function initLive() {
-  isPlayingRec = false;
-  if (player) { player.destroy(); player = null; }
-  player = new EZUIKitPlayer({ id: "video-container", accessToken: accessToken.value, url: url.value, template: "pcLive", height: 400,
-    handleError: function(err) { console.error("handleError", err); },
-    staticPath: staticPath.value, scaleMode: 1, env: { domain: "https://open.ys7.com" },
-    loggerOptions: { level: "INFO", name: "ezuikit", showTime: true }, streamInfoCBType: 1
-  });
-  player.on(EZUIKitPlayer.EVENTS.videoInfo, function(info) { console.warn("videoInfo", info); });
-  player.on(EZUIKitPlayer.EVENTS.audioInfo, function(info) { console.warn("audioInfo", info); });
-  player.on(EZUIKitPlayer.EVENTS.firstFrameDisplay, function() { console.warn("firstFrameDisplay"); });
-  window.player = player;
+
+
+async function fetchToken() {
+  if (!appKey || !appSecret) { console.warn("appKey/appSecret not set"); return false; }
+  console.log("fetching token...");
+  try {
+    var p = new URLSearchParams();
+    p.append("appKey", appKey);
+    p.append("appSecret", appSecret);
+    var r = await fetch("/api/lapp/token/get", { method: "POST", body: p });
+    var j = await r.json();
+    if (j.code === "200" && j.data && j.data.accessToken) {
+      accessToken.value = j.data.accessToken;
+      tokenExpireTime.value = j.data.expireTime || "";
+      console.log("=== Access Token ===");
+      console.log(j.data.accessToken);
+      console.log("Expires: " + tokenExpireTime.value);
+      console.log("====================");
+      return true;
+    } else {
+      console.error("token error:", j);
+      return false;
+    }
+  } catch(e) {
+    console.error("fetch error:", e);
+    return false;
+  }
 }
 
-const startDailyRecording = function() {
-  if (isRecording.value) return;
-  var date = recDate.value;
-  var startParam = timeStrToUrlParam(recStartTime.value);
-  if (!/^\d{8}$/.test(date)) { recordingProgress.value = "日期格式错误"; return; }
-  isRecording.value = true;
-  isPlayingRec = true;
-  var recUrl = "ezopen://open.ys7.com/BG9483344/1.rec?begin=" + date + startParam;
-  url.value = recUrl;
-  if (player) { player.destroy(); player = null; }
-  recordingProgress.value = "初始化回放...";
+async function fetchAndInit() {
+  var ok = await fetchToken();
+  if (ok) initPlayer();
+}
+
+function initPlayer() {
+  if (player) { player.destroy(); player = null!; }
+  const playUrl = isPlaybackMode.value ? playbackUrl.value : url.value;
   player = new EZUIKitPlayer({
-    id: "video-container", accessToken: accessToken.value, url: recUrl, template: "pcRec", height: 400,
-    handleSuccess: function() {
-      var d = date.slice(0,4)+"-"+date.slice(4,6)+"-"+date.slice(6,8);
-      player.startSave(date+"_recording").then(function() {
-        recordingProgress.value = "录制中 "+d;
-        startHeartbeat(date);
-      }).catch(function() { recordingProgress.value = "录制失败"; isRecording.value = false; });
-    },
-    handleError: function(err) {
-      var code = (err&&err.data&&err.data.nErrorCode)||(err&&err.nErrorCode);
-      if (code === 395701) { stopDailyRecordingInternal("播放结束"); }
-    },
-    staticPath: staticPath.value, scaleMode: 1, env: { domain: "https://open.ys7.com" },
-    loggerOptions: { level: "WARN", name: "ezuikit", showTime: true }, streamInfoCBType: 1
+    id: "video-container", accessToken: accessToken.value, url: playUrl,
+    template: template.value, height: 400,
+    handleError: (err: any) => { console.error("handleError", err); },
+    staticPath: staticPath.value, scaleMode: 1,
+    env: { domain: "https://open.ys7.com" },
+    loggerOptions: { level: "INFO", name: "ezuikit", showTime: true },
+    streamInfoCBType: 1,
   });
-  player.on(EZUIKitPlayer.EVENTS.firstFrameDisplay, function() {});
+  player.on(EZUIKitPlayer.EVENTS.videoInfo, (i: any) => console.warn(i));
+  player.on(EZUIKitPlayer.EVENTS.audioInfo, (i: any) => console.warn(i));
+  player.on(EZUIKitPlayer.EVENTS.firstFrameDisplay, () => {});
+  player.on(EZUIKitPlayer.EVENTS.stopSave, handleStopSave);
   window.player = player;
-};
-
-const stopDailyRecording = function() {
-  if (!isRecording.value) return;
-  stopDailyRecordingInternal("已停止");
-};
-function stopDailyRecordingInternal(msg) {
-  isRecording.value = false; isPlayingRec = false;
-  recordingProgress.value = msg;
-  if (recHeartbeat) { clearInterval(recHeartbeat); recHeartbeat = null; }
-  if (player) { player.stopSave().then(function() { console.log("done"); }).catch(function() {}); }
-  setTimeout(function() { initLive(); }, 1500);
 }
 
-function startHeartbeat(date) {
-  if (recHeartbeat) clearInterval(recHeartbeat);
-  recHeartbeat = setInterval(function() {
+async function handleStopSave(eventData) {
+  const data = (eventData && eventData.data) || eventData;
+  if (!data || !data.url) return;
+  if (!enableMinioUpload.value) return;
+  uploadStatus.value = "fetching blob...";
+  try {
+    var resp = await fetch(data.url);
+    var blob = await resp.blob();
+    var fileName = (data.file && data.file.name) || "recording_" + Date.now() + ".webm";
+    uploadStatus.value = "uploading " + fileName;
+    var url = minioEndpoint.value.replace(/\/+$/, "") + "/" + minioBucket.value + "/" + encodeURIComponent(fileName);
+    var uploadResp = await fetch(url, { method: "PUT", headers: { "Content-Type": blob.type || "video/webm" }, body: blob });
+    if (uploadResp.ok) { uploadStatus.value = "uploaded: " + fileName; }
+    else { uploadStatus.value = "upload fail: " + uploadResp.status; }
+  } catch (e) { uploadStatus.value = "upload error: " + e.message; }
+}
+
+function switchToLive() {
+  if (isRecording.value) return;
+  clearHb(); isPlaybackMode.value = false;
+  template.value = "pcLive"; initPlayer();
+}
+
+function switchToPlayback() {
+  if (isRecording.value) return;
+  clearHb(); isPlaybackMode.value = true;
+  isPlayingRec = true; template.value = "pcRec"; initPlayer();
+}
+
+
+
+function clearHb() { if (recHeartbeat) { clearInterval(recHeartbeat); recHeartbeat = null; } }
+
+function startRecording() {
+  if (isRecording.value) return;
+  const date = recDate.value;
+  if (!/^\d{8}$/.test(date)) { recordingProgress.value = "date error"; return; }
+  isRecording.value = true;
+
+  if (isPlaybackMode.value) {
+    isPlayingRec = true;
+    const begin = recStartTime.value.replace(/:/g, "");
+    const recUrl = "ezopen://open.ys7.com/BC7799091/1.rec?begin=" + date + begin;
+    playbackUrl.value = recUrl;
+    if (player) { player.destroy(); player = null!; }
+    recordingProgress.value = "initializing...";
+    player = new EZUIKitPlayer({
+      id: "video-container", accessToken: accessToken.value, url: recUrl,
+      template: "pcRec", height: 400,
+      handleSuccess: () => {
+        player.startSave(date + "_rec").then(() => {
+          recordingProgress.value = "recording"; pbHb(date);
+        }).catch(() => { recordingProgress.value = "fail"; isRecording.value = false; });
+      },
+      handleError: (err: any) => {
+        const code = (err && err.data && err.data.nErrorCode) || (err && err.nErrorCode);
+        if (code === 395701) stopRec("playback done");
+      },
+      staticPath: staticPath.value, scaleMode: 1, env: { domain: "https://open.ys7.com" },
+      loggerOptions: { level: "WARN", name: "ezuikit", showTime: true }, streamInfoCBType: 1,
+    });
+    player.on(EZUIKitPlayer.EVENTS.firstFrameDisplay, () => {});
+    player.on(EZUIKitPlayer.EVENTS.stopSave, handleStopSave);
+    window.player = player;
+  } else {
+    recordingProgress.value = "recording live...";
+    player.startSave(date + "_live").then(() => { wcHb(); })
+      .catch(() => { recordingProgress.value = "fail"; isRecording.value = false; });
+  }
+}
+
+function pbHb(date: string) {
+  clearHb();
+  recHeartbeat = setInterval(() => {
     if (!isRecording.value || !player) return;
-    player.getOSDTime().then(function(data) {
-      var time = data && data.data && data.data.time;
+    player.getOSDTime().then((data: any) => {
+      const time = data && data.data && data.data.time;
       if (!time) return;
-      var hms = time.split(" ").pop();
-      var d = date.slice(0,4)+"-"+date.slice(4,6)+"-"+date.slice(6,8);
-      recordingProgress.value = "录制中 "+d+" — "+hms;
-      var p = recEndTime.value.split(":").map(Number);
-      var endSec = p[0]*3600+p[1]*60+(p[2]||0);
-      var cp = hms.split(":").map(Number);
-      if (cp[0]*3600+cp[1]*60+(cp[2]||0) >= endSec-60) { stopDailyRecordingInternal("完成"); }
-    }).catch(function() {});
+      const hms = fmtHMS(time);
+      recordingProgress.value = date.slice(0,4) + "-" + date.slice(4,6) + "-" + date.slice(6,8) + " " + hms;
+      if (toSec(hms) >= toSec(recEndTime.value)) stopRec("done");
+    }).catch(() => {});
   }, 3000);
 }
 
-onBeforeUnmount(function() {
-  if (recHeartbeat) clearInterval(recHeartbeat);
-  isRecording.value = false;
-});
-onMounted(function() { initLive(); });
+function wcHb() {
+  clearHb();
+  recHeartbeat = setInterval(() => {
+    if (!isRecording.value) return;
+    const d = new Date();
+    const n = pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+    recordingProgress.value = "recording " + n;
+    if (toSec(n) >= toSec(recEndTime.value)) stopRec("done");
+  }, 3000);
+}
+
+function stopRec(msg: string) {
+  isRecording.value = false; isPlayingRec = false;
+  recordingProgress.value = msg; clearHb();
+  if (player) { player.stopSave().catch(() => {}); }
+}
+
+function stopRecording() { if (!isRecording.value) return; stopRec("stopped"); }
+
+onBeforeUnmount(() => { clearHb(); isRecording.value = false; });
+function startSched() {
+  if (scheduleInterval) return;
+  var lastDate = "";
+  scheduleInterval = setInterval(function() {
+    if (!scheduleEnabled.value) return;
+    var d = new Date();
+    var now = d.getHours()*3600 + d.getMinutes()*60 + d.getSeconds();
+    var today = d.getFullYear() + "-" + ("0"+(d.getMonth()+1)).slice(-2) + "-" + ("0"+d.getDate()).slice(-2);
+    var ss = toSec(recStartTime.value);
+    var es = toSec(recEndTime.value);
+    if (lastDate && lastDate !== today && isRecording.value) {
+      console.log("date changed, stop"); stopRec("date change"); lastDate = today; return;
+    }
+    lastDate = today;
+    if (!isRecording.value && now >= ss && now < es) {
+      console.log("auto-start at " + ("0"+d.getHours()).slice(-2) + ":" + ("0"+d.getMinutes()).slice(-2));
+      startRecording();
+    }
+    if (isRecording.value && now >= es) {
+      console.log("auto-stop at " + ("0"+d.getHours()).slice(-2) + ":" + ("0"+d.getMinutes()).slice(-2));
+      stopRec("auto");
+    }
+  }, 30000);
+}
+
+onMounted(function() { initPlayer(); startSched(); if (appKey && appSecret) fetchAndInit(); });
 </script>
 
 <template>
-  <div class="player-wrapper">
-    <div id="video-container" style="height: 400px"></div>
-    <div class="config-panel">
-      <label> accessToken: <input v-model="accessToken" type="text" placeholder="请输入 accessToken" /> </label>
-      <label> 直播 url: <input v-model="url" type="text" placeholder="请输入直播播放地址" /> </label>
-      <label> staticPath: <input v-model="staticPath" type="text" placeholder="请输入 staticPath" /> </label>
+  <div class="pw">
+    <div class="ms">
+      <button :class="{ active: !isPlaybackMode }" @click="switchToLive" :disabled="isRecording">Live</button>
+      <button :class="{ active: isPlaybackMode }" @click="switchToPlayback" :disabled="isRecording">Playback</button>
     </div>
-    <div class="button-panel">
-      <button @click="initLive">init</button>
+    <div id="video-container" style="height: 400px"></div>
+    <div class="cp">
+      <label>accessToken: <input v-model="accessToken" type="text" readonly /></label>
+      <label v-if="!isPlaybackMode">Live URL: <input v-model="url" type="text" /></label>
+      <label v-if="isPlaybackMode">Playback URL: <input v-model="playbackUrl" type="text" /></label>
+      <label>staticPath: <input v-model="staticPath" type="text" /></label>
+    </div>
+    <div class="bp">
+      <button @click="fetchAndInit">fetch token + init</button>
       <button @click="stop">stop</button>
       <button @click="play">play</button>
-      <button @click="openSound">openSound</button>
-      <button @click="closeSound">closeSound</button>
-      <button @click="startSave">startSave</button>
-      <button @click="stopSave">stopSave</button>
-      <button @click="capturePicture">截图</button>
-      <button @click="fullscreen">全屏</button>
-      <button @click="startTalk">startTalk</button>
-      <button @click="stopTalk">stopTalk</button>
-      <button @click="destroy">destroy</button>
+      <button @click="openSound">sound+</button>
+      <button @click="closeSound">sound-</button>
+      <button @click="startSave">save+</button>
+      <button @click="stopSave">save-</button>
+      <button @click="capturePicture">capture</button>
+      <button @click="fullscreen">fullscreen</button>
+      <button @click="startTalk">talk+</button>
+      <button @click="stopTalk">talk-</button>
+      <button @click="destroyF">destroy</button>
     </div>
-    <div class="daily-section">
+    <div class="ds">
       <fieldset>
-        <legend>📅 全天回放录制</legend>
-        <p class="desc">指定日期和时间范围，自动回放并录制成录像文件。</p>
-        <div class="daily-row">
-          <label>日期: <input v-model="recDate" type="text" placeholder="20260713" :disabled="isRecording" /></label>
-          <label>开始: <input v-model="recStartTime" type="text" placeholder="00:00:00" :disabled="isRecording" class="ti" /></label>
-          <label>结束: <input v-model="recEndTime" type="text" placeholder="23:59:59" :disabled="isRecording" class="ti" /></label>
+        <legend>Daily Recording</legend>
+        <label class="dr"><input v-model="scheduleEnabled" type="checkbox" /> Auto record (start at begin time, stop at end time, check every 30s)</label>
+        <p class="desc">Record in current mode. Auto-stop at end time.</p>
+        <div class="dr">
+          <label>Date: <input v-model="recDate" type="text" :disabled="isRecording" class="ti" /></label>
+          <label>Start: <input v-model="recStartTime" type="text" :disabled="isRecording" class="ti" /></label>
+          <label>End: <input v-model="recEndTime" type="text" :disabled="isRecording" class="ti" /></label>
         </div>
-        <div class="daily-row">
-          <button :disabled="isRecording" @click="startDailyRecording" class="bp">开始录制</button>
-          <button :disabled="!isRecording" @click="stopDailyRecording" class="br">停止录制</button>
-          <div v-if="recordingProgress" class="pg">{{ recordingProgress }}</div>
+        <div class="dr">
+          <button :disabled="isRecording" @click="startRecording" class="green">Start</button>
+          <button :disabled="!isRecording" @click="stopRecording" class="red">Stop</button>
+          <span v-if="recordingProgress" class="pg">{{ recordingProgress }}</span>
         </div>
       </fieldset>
+      <fieldset v-if="isPlaybackMode">
+        <legend>Seek</legend>
+        <label>Time (yyyyMMddhhmmss): <input v-model="seekInput" type="text" class="ti" /></label>
+        <button @click="seekToTime">Seek</button>
+      </fieldset>
       <fieldset>
-        <legend>⏩ 时间跳转</legend>
-        <label>目标 (yyyyMMddhhmmss): <input v-model="seekInput" type="text" placeholder="20260713000000" class="ti" /></label>
-        <button @click="seekToTime" :disabled="!isPlayingRec">跳转</button>
-        <span v-if="!isPlayingRec">仅回放时可用</span>
+        <legend>MinIO Upload</legend>
+        <label class="dr"><input v-model="enableMinioUpload" type="checkbox" /> Enable auto-upload to MinIO</label>
+        <div class="dr" v-if="enableMinioUpload">
+          <label>Endpoint: <input v-model="minioEndpoint" type="text" class="ti" /></label>
+          <label>Bucket: <input v-model="minioBucket" type="text" class="ti" /></label>
+          <label>Access Key: <input v-model="minioAccessKey" type="text" class="ti" /></label>
+          <label>Secret Key: <input v-model="minioSecretKey" type="password" class="ti" /></label>
+        </div>
+        <span v-if="uploadStatus" class="pg">{{ uploadStatus }}</span>
       </fieldset>
     </div>
   </div>
 </template>
 
 <style scoped>
-.player-wrapper { font-family: "PingFang SC","Microsoft YaHei",sans-serif; max-width: 920px; margin: 0 auto; padding: 16px; }
-.config-panel { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; font-size: 14px; }
-.config-panel label { display: flex; align-items: center; gap: 8px; }
-.config-panel input { flex: 1; padding: 6px 10px; border: 1px solid #dcdfe6; border-radius: 4px; font-size: 13px; }
-.button-panel { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.button-panel button { padding: 6px 14px; border: 1px solid #dcdfe6; background: #fff; color: #333; border-radius: 4px; cursor: pointer; font-size: 13px; }
-.button-panel button:hover { border-color: #407aff; color: #407aff; }
-.daily-section { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
-.daily-section fieldset { border: 1px solid #ddd; border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-.daily-section legend { font-size: 13px; font-weight: 600; padding: 0 6px; color: #407aff; }
-.daily-section button { padding: 6px 14px; border: 1px solid #407aff; background: #fff; color: #407aff; border-radius: 4px; cursor: pointer; font-size: 13px; align-self: flex-start; }
-.daily-section button:hover { background: #407aff; color: #fff; }
-.daily-section button:disabled { opacity: .5; cursor: not-allowed; border-color: #aaa; color: #aaa; }
-.bp { border-color: #22a559 !important; color: #22a559 !important; }
-.bp:hover:not(:disabled) { background: #22a559 !important; color: #fff !important; }
-.br { border-color: #e24a4a !important; color: #e24a4a !important; }
-.br:hover:not(:disabled) { background: #e24a4a !important; color: #fff !important; }
-.desc { font-size: 12px; color: #888; margin: 0; }
-.daily-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.daily-row label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #333; }
+.pw { font-family: "PingFang SC","Microsoft YaHei",sans-serif; max-width: 920px; margin: 0 auto; padding: 16px; }
+.ms { display: flex; gap: 8px; margin-bottom: 12px; }
+.ms button { flex: 1; padding: 8px; border: 1px solid #407aff; background: #fff; color: #407aff; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.ms button.active { background: #407aff; color: #fff; }
+.cp { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; font-size: 14px; }
+.cp label { display: flex; align-items: center; gap: 8px; }
+.cp input { flex: 1; padding: 6px 10px; border: 1px solid #dcdfe6; border-radius: 4px; font-size: 13px; }
+.bp { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.bp button { padding: 6px 14px; border: 1px solid #dcdfe6; background: #fff; color: #333; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.bp button:hover { border-color: #407aff; color: #407aff; }
+.ds { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+.ds fieldset { border: 1px solid #ddd; border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.ds legend { font-size: 13px; font-weight: 600; padding: 0 6px; color: #407aff; }
+.ds button { padding: 6px 14px; border: 1px solid #407aff; background: #fff; color: #407aff; border-radius: 4px; cursor: pointer; font-size: 13px; align-self: flex-start; }
+.ds button:hover { background: #407aff; color: #fff; }
+.ds button:disabled { opacity: 0.5; cursor: not-allowed; border-color: #aaa; color: #aaa; }
+.dr { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.dr label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .ti { width: 140px; padding: 5px 8px; border: 1px solid #dcdfe6; border-radius: 4px; font-size: 13px; }
-.daily-section input { width: 180px; padding: 5px 8px; border: 1px solid #dcdfe6; border-radius: 4px; font-size: 13px; }
-.pg { font-size: 13px; color: #22a559; background: #eafaf1; padding: 6px 12px; border-radius: 4px; width: 100%; }
+.pg { font-size: 13px; color: #22a559; background: #eafaf1; padding: 6px 12px; border-radius: 4px; }
+.green { border-color: #22a559 !important; color: #22a559 !important; }
+.green:hover:not(:disabled) { background: #22a559 !important; color: #fff !important; }
+.red { border-color: #e24a4a !important; color: #e24a4a !important; }
+.red:hover:not(:disabled) { background: #e24a4a !important; color: #fff !important; }
+.desc { font-size: 12px; color: #888; margin: 0; }
 </style>
