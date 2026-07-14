@@ -62,6 +62,36 @@ function seekToTime() { if (player && isPlayingRec) player.seekTo(seekInput.valu
 
 
 
+function loadToken() {
+  function pad2(n){return("0"+n).slice(-2)}
+  var t = localStorage.getItem('ez_token');
+  var e = localStorage.getItem('ez_expire');
+  if (!t || !e) return false;
+  var now = new Date();
+  var today = now.getFullYear()+'-'+('0'+(now.getMonth()+1)).slice(-2)+'-'+('0'+now.getDate()).slice(-2);
+  var ed = e.split(' ')[0];
+    var ed = new Date(parseInt(e));
+  var n = new Date();
+  // Use cache only when expire date is AFTER today (at least tomorrow)
+  // If expire is today or earlier, re-fetch
+  var edNorm = new Date(ed.getFullYear(),ed.getMonth(),ed.getDate());
+  var todayNorm = new Date(n.getFullYear(),n.getMonth(),n.getDate());
+  if (edNorm > todayNorm) {
+    accessToken.value = t;
+    tokenExpireTime.value = e;
+    console.log("use cached token, expires: "+ed.getFullYear()+"-"+pad2(ed.getMonth()+1)+"-"+pad2(ed.getDate())+" > today, valid");
+    return true;
+  }
+  console.log("token expired or expires today, re-fetching");
+  localStorage.removeItem('ez_token'); localStorage.removeItem('ez_expire');
+  return false;
+}
+function saveToken(t,e) {
+  localStorage.setItem('ez_token',t); localStorage.setItem('ez_expire',e);
+    var ed2 = new Date(parseInt(e));
+  console.log("token saved, expires: "+ed2.getFullYear()+"-"+("0"+(ed2.getMonth()+1)).slice(-2)+"-"+("0"+ed2.getDate()).slice(-2));
+}
+
 async function fetchToken() {
   if (!appKey || !appSecret) { console.warn("appKey/appSecret not set"); return false; }
   console.log("fetching token...");
@@ -74,9 +104,10 @@ async function fetchToken() {
     if (j.code === "200" && j.data && j.data.accessToken) {
       accessToken.value = j.data.accessToken;
       tokenExpireTime.value = j.data.expireTime || "";
+      saveToken(j.data.accessToken, j.data.expireTime || "");
       console.log("=== Access Token ===");
       console.log(j.data.accessToken);
-      console.log("Expires: " + tokenExpireTime.value);
+      console.log("Expires: " + new Date(parseInt(tokenExpireTime.value)).toLocaleString());
       console.log("====================");
       return true;
     } else {
@@ -90,6 +121,7 @@ async function fetchToken() {
 }
 
 async function fetchAndInit() {
+  if (loadToken()) { initPlayer(); return; }
   var ok = await fetchToken();
   if (ok) initPlayer();
 }
