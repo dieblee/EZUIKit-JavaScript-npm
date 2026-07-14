@@ -132,6 +132,7 @@ function initPlayer() {
   player = new EZUIKitPlayer({
     id: "video-container", accessToken: accessToken.value, url: playUrl,
     template: template.value, height: 400,
+    decoderType: "v3",
     handleError: (err: any) => { console.error("handleError", err); },
     staticPath: staticPath.value, scaleMode: 1,
     env: { domain: "https://open.ys7.com" },
@@ -194,6 +195,7 @@ function startRecording() {
     player = new EZUIKitPlayer({
       id: "video-container", accessToken: accessToken.value, url: recUrl,
       template: "pcRec", height: 400,
+      decoderType: "v3",
       handleSuccess: () => {
         player.startSave(date + "_rec").then(() => {
           recordingProgress.value = "recording"; pbHb(date);
