@@ -18,6 +18,18 @@ export default defineConfig({
         target: "https://open.ys7.com",
         changeOrigin: true,
       },
+      "/api/lapp/trust": {
+        target: "https://open.ys7.com",
+        changeOrigin: true,
+      },
+      "/api/lapp/device/camera/list": {
+        target: "https://open.ys7.com",
+        changeOrigin: true,
+      },
+      "/api/lapp/device/list": {
+        target: "https://open.ys7.com",
+        changeOrigin: true,
+      },
     },
   },
 });
